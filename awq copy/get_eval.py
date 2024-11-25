@@ -14,6 +14,8 @@ def get_eval(model, args):
     train_loaders = {dataset: get_loader(dataset, model=args.model_path, n_sample=args.nsamples , train=True, seed=args.seed, seqlen=model.seqlen) for dataset in datasets}
     test_loaders = {dataset: get_loader(dataset, model=args.model_path, train=False, seqlen=model.seqlen) for dataset in datasets}
 
+    metric_ppl = dict()
+
     for metric in ['ppl', 'sample_ppl']:
         if metric == 'ppl':
             loaders = test_loaders
@@ -26,3 +28,7 @@ def get_eval(model, args):
         for dataset, loader in loaders.items():
             metric_list[dataset] = eval_metric(model=model, metric=metric, loader=loader, device=torch.device("cuda"), seqlen=model.seqlen)
             print(f'{dataset} {metric} : {metric_list[dataset]}')
+
+        metric_ppl[metric] = metric_list
+
+    return metric_ppl

@@ -28,11 +28,16 @@ from awq.utils.utils import simple_dispatch_model
 from datasets import load_dataset
 from torch import nn
 import tqdm
+from datetime import datetime
+from time import sleep
 
 from search_space.llama import LlamaSearchSpace
 from .get_eval import get_eval
 
+
 # import nvtx
+
+bool_parser = lambda x : (True if x == 'True' else (False if x == 'False' else argparse.ArgumentTypeError('Boolean value expected.')))
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model_path", type=str, help="path of the hf model")
@@ -81,17 +86,20 @@ parser.add_argument(
 )
 
 parser.add_argument('--seed', type=int, default=0)
-parser.add_argument('--true-quantflow', action='store_true', help='True quantization result flow')
-parser.add_argument('--bit_adjust_per_linear', action='store_true', help='smoothing per linear layer')
-parser.add_argument('--clip_asym', action='store_true', help='clip asymmetry')
+parser.add_argument('--quantflow', type=bool_parser, default=False, help='True quantization result flow')
+parser.add_argument('--bit_adjust_per_linear', type=bool_parser, default=False, help='smoothing per linear layer')
+parser.add_argument('--clip_asym', type=bool_parser, default=False, help='clip asymmetry')
 parser.add_argument('--arch_path', type=str, help='Path to the architecture file')
 parser.add_argument(
         '--nsamples', type=int, default=128,
         help='Number of calibration data samples.'
     )
-parser.add_argument('--eval' , action='store_true', help='Evaluate the model')
-parser.add_argument('--arch_idx', type=int, default=0, help='Index of the architecture')
-parser.add_argument('--end_to_end', action='store_true', help='If true, run end to end run_awq -> quantization')
+parser.add_argument('--eval', type = bool_parser, default = False, help='Evaluate the model')
+parser.add_argument('--arch_idx', type=int, default=0, help='Index of the architecture')# parser.add_argument('--end_to_end', action='store_true', help='If true, run end to end run_awq -> quantization')
+parser.add_argument('--end_to_end', type=bool_parser, default=False, help='If true, run end to end run_awq -> quantization')
+
+parser.add_argument('--result_ppl_path', type=str, help='Path to the result file')
+parser.add_argument('--result_sample_ppl_path', type=str, help='Path to the result file')
 
 
 args = parser.parse_args()
@@ -125,7 +133,7 @@ def set_seed(seed):
 set_seed(args.seed)
 
 
-def build_model_and_enc(model_path, archs = None):
+def build_model_and_enc(model_path, arch = None):
     # if not os.path.exists(model_path):  # look into ssd
     #     raise FileNotFoundError(f"{model_path} not found!")
     print(f"* Building model {model_path}")
@@ -216,10 +224,9 @@ def build_model_and_enc(model_path, archs = None):
                 seqlen=512,
                 
                 ## customizing
-                true_quantflow = args.true_quantflow,
-
+                quantflow = args.quantflow,
                 bit_adjust_per_linear = args.bit_adjust_per_linear,
-                arch = archs[args.arch_idx][0]['linear'] if args.bit_adjust_per_linear else None,
+                arch = arch['linear'] if args.bit_adjust_per_linear else None,
 
                 clip_asym = args.clip_asym,
             )
@@ -255,7 +262,7 @@ def build_model_and_enc(model_path, archs = None):
                 pseudo_quantize_model_weight(model, w_bit=args.w_bit, q_config=q_config, 
                                 ## customizing
                                 bit_adjust_per_linear = awq_results['bit_adjust_per_linear'],
-                                arch = archs[args.arch_idx][0]['linear'] if args.bit_adjust_per_linear else None,
+                                arch = arch['linear'] if args.bit_adjust_per_linear else None,
                                 )
                 if args.dump_fake:
                     model.save_pretrained(args.dump_fake)
@@ -312,19 +319,50 @@ def main():
     if args.bit_adjust_per_linear:
         import json
         with open(args.arch_path, 'r') as f:
-            arch = json.load(f)
-            archs = arch['archive']
+            nsga_data = json.load(f)
+            arch = nsga_data['archive'][args.arch_idx][0]
     else:
-        archs = None
+        arch = None
 
-    model, enc = build_model_and_enc(args.model_path, archs)
+    model, enc = build_model_and_enc(args.model_path, arch)
     if args.end_to_end and args.run_awq and args.load_awq:
         args.run_awq = False
         args.end_to_end = False
-        model, enc = build_model_and_enc(args.model_path, archs)
+        model, enc = build_model_and_enc(args.model_path, arch)
 
     if args.eval:
-        get_eval(model, args)
+        metric_ppl = get_eval(model, args)
+        if args.result_ppl_path is not None:
+            for _ in range(5):
+                try:
+                    with open(args.result_ppl_path, 'r') as f:
+                        data = json.load(f)
+                        data['end_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        data['archive'].append([arch, nsga_data['archive'][args.arch_idx][1], {'wikitext' : metric_ppl['ppl']['wikitext2']}])
+                    with open(args.result_ppl_path, 'w') as f:
+                        json.dump(data, f, ensure_ascii=False, indent=4)
+
+                    break
+                except Exception as e:
+                    print(e)
+                    sleep(5)
+
+        if args.result_sample_ppl_path is not None:
+            for _ in range(5):
+                try:
+                    with open(args.result_sample_ppl_path, 'r') as f:
+                        data = json.load(f)
+                        data['end_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        data['archive'].append([arch, nsga_data['archive'][args.arch_idx][1], {'wikitext' : metric_ppl['sample_ppl']['wikitext2']}])
+                    with open(args.result_sample_ppl_path, 'w') as f:
+                        json.dump(data, f, ensure_ascii=False, indent=4)
+
+                    break
+                except Exception as e:
+                    print(e)
+                    sleep(5)
+        
+
 
     if args.tasks is not None:
         # https://github.com/IST-DASLab/gptq/blob/2d65066eeb06a5c9ff5184d8cebdf33662c67faf/llama.py#L206

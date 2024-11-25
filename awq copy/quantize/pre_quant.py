@@ -275,13 +275,13 @@ def run_awq(
     calib_data="pileval",
 
     ## customizing
-    true_quantflow = False,
+    quantflow = False,
     bit_adjust_per_linear = False,
     arch = None,
     clip_asym = False
 ):
-    if true_quantflow:
-        return run_awq_true_quantflow(model, enc, w_bit, q_config, n_samples, seqlen, auto_scale, mse_range, calib_data, clip_asym = clip_asym)
+    if quantflow:
+        return run_awq_quantflow(model, enc, w_bit, q_config, n_samples, seqlen, auto_scale, mse_range, calib_data, clip_asym = clip_asym)
     if bit_adjust_per_linear:
         print('bit_adjust_per_linear')
         print("clip_asym", clip_asym)
@@ -447,7 +447,7 @@ def apply_awq(model, awq_results):
 
 ## customizing for true quantflow
 @torch.no_grad()
-def run_awq_true_quantflow(
+def run_awq_quantflow(
     model,
     enc,
     w_bit,
