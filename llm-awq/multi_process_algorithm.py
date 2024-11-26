@@ -71,5 +71,3 @@ if __name__ == "__main__":
         p.join()
 
     print("All processes completed.")
-
-    dd
