@@ -1,39 +1,41 @@
 import torch
 import torch.nn as nn
+
 from .quantizer import pseudo_quantize_tensor
 import gc
 
 __all__ = ["auto_clip_block"]
 
-@torch.no_grad()
-def auto_clip_block_asym(module, w_bit, q_config, input_feat, bit_diff_while_smoothing = False, module_bit = None):
-    if bit_diff_while_smoothing:
-        return auto_clip_block_bit_adjust(module, w_bit, q_config, input_feat, bit_diff_while_smoothing, module_bit)
-    named_linears = {
-        name: m for name, m in module.named_modules() if isinstance(m, nn.Linear)
-    }
-    # clip_list = []
-    max_clip_list = []
-    min_clip_list = []
-    for name in named_linears:
-        # due to qk bmm, it is hard to clip precisely
-        if any([_ in name for _ in ["q_", "k_", "query", "key", "Wqkv"]]):
-            continue
-        named_linears[name].cuda()
-        max_val, min_val = auto_clip_layer_asym(
-            named_linears[name].weight, input_feat[name], n_bit=w_bit, q_config=q_config
-        )
-        # clip_list.append((name, max_val))
-        max_clip_list.append((name, max_val))
-        min_clip_list.append((name, min_val))
-        named_linears[name].cpu()
-    # return clip_list
-    return max_clip_list, min_clip_list
+# @torch.no_grad()
+# def auto_clip_block_asym(module, w_bit, q_config, input_feat, bit_diff_while_smoothing = False, module_bit = None):
+#     if bit_diff_while_smoothing:
+#         return auto_clip_block_bit_adjust(module, w_bit, q_config, input_feat, bit_diff_while_smoothing, module_bit)
+#     named_linears = {
+#         name: m for name, m in module.named_modules() if isinstance(m, nn.Linear)
+#     }
+#     # clip_list = []
+#     max_clip_list = []
+#     min_clip_list = []
+#     for name in named_linears:
+#         # due to qk bmm, it is hard to clip precisely
+#         if any([_ in name for _ in ["q_", "k_", "query", "key", "Wqkv"]]):
+#             continue
+#         named_linears[name].cuda()
+#         max_val, min_val = auto_clip_layer_asym(
+#             named_linears[name].weight, input_feat[name], n_bit=w_bit, q_config=q_config
+#         )
+#         # clip_list.append((name, max_val))
+#         max_clip_list.append((name, max_val))
+#         min_clip_list.append((name, min_val))
+#         named_linears[name].cpu()
+#     # return clip_list
+#     return max_clip_list, min_clip_list
 
 @torch.no_grad()
 def auto_clip_layer_asym(
     w, input_feat, n_bit, q_config, n_grid=20, max_shrink=0.5, n_sample_token=512
 ):
+    assert n_bit == int(n_bit), "bit should be integer"
     assert w.dim() == 2
     org_w_shape = w.shape
     # w           [co, ci]      -> [co, 1, n_group, group size]
@@ -41,6 +43,10 @@ def auto_clip_layer_asym(
     group_size = (
         q_config["q_group_size"] if q_config["q_group_size"] > 0 else w.shape[1]
     )
+
+    # if owq_column is not None:
+        # original = w[:, owq_column].clone()
+        
     input_feat = input_feat.view(-1, input_feat.shape[-1])
     input_feat = input_feat.reshape(1, input_feat.shape[0], -1, group_size)
     input_feat = input_feat[:, 0 :: input_feat.shape[1] // n_sample_token]
@@ -63,7 +69,11 @@ def auto_clip_layer_asym(
         best_min_val = org_min_val.clone()
         min_errs = torch.ones_like(org_max_val) * 1e9
         input_feat = input_feat.to(w.device)
+        
         org_out = (input_feat * w).sum(dim=-1)  # co, n_token, n_group
+        # if owq_column is not None:
+        #     original = w[:, 0, [x // group_size for x in owq_column], [x % group_size for x in owq_column]].clone()
+        #     w[:, 0, [x // group_size for x in owq_column], [x % group_size for x in owq_column]] = 0
 
         org_out_dict = {}
 
@@ -72,6 +82,10 @@ def auto_clip_layer_asym(
             min_val = org_min_val * (1 - i_s / n_grid)
             cur_w = torch.clamp(w, min_val, max_val)
             q_w = pseudo_quantize_tensor(cur_w, n_bit=n_bit, **q_config)
+
+            # if owq_column is not None:
+                # q_w[:, 0, [x // group_size for x in owq_column], [x % group_size for x in owq_column]] = original
+
             cur_out = (input_feat * q_w).sum(dim=-1)
 
             # co, 1, n_group, 1
@@ -96,7 +110,7 @@ def auto_clip_layer_asym(
 
 
 @torch.no_grad()
-def auto_clip_block_asym_bit_adjust(module, w_bit, q_config, input_feat, module_bit = None):
+def auto_clip_block_asym_bit_adjust(module, w_bit, q_config, input_feat, module_bit = None, owq_layer = None):
     named_linears = {
         name: m for name, m in module.named_modules() if isinstance(m, nn.Linear)
     }
@@ -110,7 +124,9 @@ def auto_clip_block_asym_bit_adjust(module, w_bit, q_config, input_feat, module_
         q_config['q_group_size'] = 64 if module_bit[name] == 2 else 128
         max_val, min_val = auto_clip_layer_asym(
             # named_linears[name].weight, input_feat[name], n_bit=w_bit, q_config=q_config
-            named_linears[name].weight, input_feat[name], n_bit=module_bit[name], q_config=q_config
+            named_linears[name].weight, input_feat[name], n_bit=module_bit[name], q_config=q_config,
+            ## customizing
+            # owq_column = owq_layer[name] if owq_layer is not None and 'o_' not in name else None
         )
         max_clip_list.append((name, max_val))
         min_clip_list.append((name, min_val))

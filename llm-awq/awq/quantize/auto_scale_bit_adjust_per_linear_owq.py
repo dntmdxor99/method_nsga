@@ -84,15 +84,14 @@ def scale_gelu_fc(gelu, fc, scales):
 
 
 @torch.no_grad()
-def auto_scale_block_bit_adjust_per_linear(module, module_kwargs, w_bit, q_config, input_feat, module_bit = None, owq_layer = None):
-    assert owq_layer is None, "owq_layer is not supported in auto_scale_block_bit_adjust_per_linear. It is only supported in auto_scale_block_bit_adjust_per_lienar_owq"
-
+def auto_scale_block_bit_adjust_per_linear_owq(module, module_kwargs, w_bit, q_config, input_feat, module_bit = None, owq_layer = None):
     from .quantizer import pseudo_quantize_tensor
     # firstly, get the weight quantize function
     if w_bit is not None:
 
         def w_quantize_func(p, bit=None):
             if bit:
+                assert bit == int(bit), "bit should be integer"
                 return pseudo_quantize_tensor(
                     p,
                     n_bit=bit,
@@ -114,8 +113,8 @@ def auto_scale_block_bit_adjust_per_linear(module, module_kwargs, w_bit, q_confi
     if "use_cache" in module_kwargs:
         module_kwargs.pop("use_cache")
 
-
-    def _search_module_scale_per_linear(block, linears2scale: dict, x, kwargs={}, module_bit=None):
+    @torch.no_grad()
+    def _search_module_scale_per_linear(block, linears2scale: dict, x, kwargs={}, module_bit=None, owq_layer = None):
         # w: co, ci
         # x: n, ci
         assert module_bit is not None
@@ -136,15 +135,34 @@ def auto_scale_block_bit_adjust_per_linear(module, module_kwargs, w_bit, q_confi
         n_grid = 20
         history = []
 
+        original = dict()
+        for fc_name, fc in linears2scale.items():
+            if fc_name != 'self_attn.o_proj':
+                assert owq_layer is not None, "if fc is not self_attn.o_proj, owq_layer should be provided"
+                original[fc_name] = fc.weight[:, owq_layer[fc_name]].clone()
+
         org_sd = {k: v.cpu() for k, v in block.state_dict().items()}
         for ratio in range(n_grid):
             ratio = ratio * 1 / n_grid
             scales = x_max.pow(ratio).clamp(min=1e-4).view(-1)
             scales = scales / (scales.max() * scales.min()).sqrt()
             for fc_name, fc in linears2scale.items():
-                fc.weight.mul_(scales.view(1, -1).to(fc.weight.device))
-                # fc.weight.data = w_quantize_func(fc.weight.data) / (scales.view(1, -1))
-                fc.weight.data = w_quantize_func(fc.weight.data, bit = module_bit[fc_name]) / (scales.view(1, -1))
+                if int(module_bit[fc_name]) != module_bit[fc_name]:
+                    if fc_name != 'self_attn.o_proj':
+                        fc.weight[:, owq_layer[fc_name]] = 0
+
+                    fc.weight.mul_(scales.view(1, -1).to(fc.weight.device))
+                    fc.weight.data = w_quantize_func(fc.weight.data, bit = int(module_bit[fc_name])) / (scales.view(1, -1))
+
+                    if fc_name != 'self_attn.o_proj':
+                        fc.weight[:, owq_layer[fc_name]] = original[fc_name]
+
+                elif int(module_bit[fc_name]) == module_bit[fc_name]:
+                    fc.weight.mul_(scales.view(1, -1).to(fc.weight.device))
+                    fc.weight.data = w_quantize_func(fc.weight.data, bit = int(module_bit[fc_name])) / (scales.view(1, -1))
+                else:
+                    raise NotImplementedError(f"module_bit {module_bit[fc_name]} not supported yet")
+
             out = block(x, **kwargs)
             if isinstance(out, tuple):
                 out = out[0]
@@ -164,6 +182,10 @@ def auto_scale_block_bit_adjust_per_linear(module, module_kwargs, w_bit, q_confi
             raise Exception
         # print(best_ratio)
         best_scales = best_scales.view(-1)
+
+        for fc_name, fc in linears2scale.items():
+            if fc_name != 'self_attn.o_proj':
+                del original[fc_name]
 
         assert torch.isnan(best_scales).sum() == 0, best_scales
         return best_scales.detach()
@@ -218,14 +240,14 @@ def auto_scale_block_bit_adjust_per_linear(module, module_kwargs, w_bit, q_confi
         assert torch.isnan(best_scales).sum() == 0, best_scales
         return best_scales.detach()
 
-    def _auto_get_scale(prev_op, layers, inp, module2inspect=None, kwargs={}, module_bit=None):
+    def _auto_get_scale(prev_op, layers, inp, module2inspect=None, kwargs={}, module_bit=None, owq_layer = None):
         # module2inspect: if given, we will check the output diff of this module instead of layers
         if module2inspect is None:
             assert len(layers) == 1
             module2inspect = list(layers.values())[0]
 
 
-        scales = _search_module_scale_per_linear(module2inspect, layers, inp, kwargs, module_bit = module_bit)
+        scales = _search_module_scale_per_linear(module2inspect, layers, inp, kwargs, module_bit = module_bit, owq_layer = owq_layer)
         scales = scales.detach().cpu()
         # prev_op_name, [layer_name], scale
         return (
@@ -295,6 +317,7 @@ def auto_scale_block_bit_adjust_per_linear(module, module_kwargs, w_bit, q_confi
                 module2inspect=module.self_attn,
                 kwargs=module_kwargs,
                 module_bit = module_bit,
+                owq_layer = owq_layer,
             )
         )
         # attn out
@@ -309,6 +332,7 @@ def auto_scale_block_bit_adjust_per_linear(module, module_kwargs, w_bit, q_confi
                     },
                     inp=input_feat["self_attn.o_proj"],
                     module_bit = module_bit,
+                    owq_layer = owq_layer,
                 )
             )
         # fc1
@@ -323,6 +347,7 @@ def auto_scale_block_bit_adjust_per_linear(module, module_kwargs, w_bit, q_confi
                 inp=input_feat["mlp.gate_proj"],
                 module2inspect=module.mlp,
                 module_bit = module_bit,
+                owq_layer = owq_layer,
             )
         )
         # fc2
@@ -335,6 +360,7 @@ def auto_scale_block_bit_adjust_per_linear(module, module_kwargs, w_bit, q_confi
                 },
                 inp=input_feat["mlp.down_proj"],
                 module_bit = module_bit,
+                owq_layer = owq_layer,
             )
         )
 

@@ -32,7 +32,10 @@ from datetime import datetime
 from time import sleep
 
 from search_space.llama import LlamaSearchSpace
-from .get_eval import get_eval
+
+from manage_json import *
+from get_eval import get_eval
+from init_seed import init_seed
 
 
 # import nvtx
@@ -95,11 +98,10 @@ parser.add_argument(
         help='Number of calibration data samples.'
     )
 parser.add_argument('--eval', type = bool_parser, default = False, help='Evaluate the model')
-parser.add_argument('--arch_idx', type=int, default=0, help='Index of the architecture')# parser.add_argument('--end_to_end', action='store_true', help='If true, run end to end run_awq -> quantization')
+parser.add_argument('--result_save_name', type=str, help='Name of the result file directory')
+parser.add_argument('--arch_idx', type=int, default=0, help='Index of the architecture')
 parser.add_argument('--end_to_end', type=bool_parser, default=False, help='If true, run end to end run_awq -> quantization')
-
-parser.add_argument('--result_ppl_path', type=str, help='Path to the result file')
-parser.add_argument('--result_sample_ppl_path', type=str, help='Path to the result file')
+parser.add_argument('--owq', type=str, default=None, help='If path exists, run with owq')
 
 
 args = parser.parse_args()
@@ -120,20 +122,9 @@ q_config = {
 print("Quantization config:", q_config)
 
 # build model and tokenizer
+init_seed(args.seed)
 
-def set_seed(seed):
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed) # if use multi-GPU
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    np.random.seed(seed)
-    random.seed(seed)
-
-set_seed(args.seed)
-
-
-def build_model_and_enc(model_path, arch = None):
+def build_model_and_enc(model_path, arch = None, owq = None):
     # if not os.path.exists(model_path):  # look into ssd
     #     raise FileNotFoundError(f"{model_path} not found!")
     print(f"* Building model {model_path}")
@@ -229,6 +220,7 @@ def build_model_and_enc(model_path, arch = None):
                 arch = arch['linear'] if args.bit_adjust_per_linear else None,
 
                 clip_asym = args.clip_asym,
+                owq = owq,
             )
 
             ## customizing
@@ -250,7 +242,7 @@ def build_model_and_enc(model_path, arch = None):
         if args.load_awq:
             print("Loading pre-computed AWQ results from", args.load_awq)
             awq_results = torch.load(args.load_awq, map_location="cpu")             
-            apply_awq(model, awq_results)
+            apply_awq(model, awq_results, owq = owq)
 
         # weight quantization
         if args.w_bit is not None:
@@ -263,6 +255,7 @@ def build_model_and_enc(model_path, arch = None):
                                 ## customizing
                                 bit_adjust_per_linear = awq_results['bit_adjust_per_linear'],
                                 arch = arch['linear'] if args.bit_adjust_per_linear else None,
+                                owq = owq,
                                 )
                 if args.dump_fake:
                     model.save_pretrained(args.dump_fake)
@@ -324,44 +317,27 @@ def main():
     else:
         arch = None
 
-    model, enc = build_model_and_enc(args.model_path, arch)
+    if args.result_save_name:
+        result_ppl_path = init_json(args = args, save_path = '/NAS/Woo/Automation/autoopt/result', save_name = args.result_save_name, model_name = args.model_path.split("/")[-1], algorithm = True, dataset = 'wikitext2', metric = 'ppl')
+        result_sample_ppl_path = init_json(args = args, save_path = '/NAS/Woo/Automation/autoopt/result', save_name = args.result_save_name, model_name = args.model_path.split("/")[-1], algorithm = True, dataset = 'wikitext2', metric = 'sample_ppl')
+
+    if args.owq:
+        print(f"Loading owq from {args.owq}")
+        owq = torch.load(args.owq)
+    else:
+        owq = None
+
+    model, enc = build_model_and_enc(args.model_path, arch, owq)
     if args.end_to_end and args.run_awq and args.load_awq:
         args.run_awq = False
         args.end_to_end = False
-        model, enc = build_model_and_enc(args.model_path, arch)
+        model, enc = build_model_and_enc(args.model_path, arch, owq)
 
     if args.eval:
-        metric_ppl = get_eval(model, args)
-        if args.result_ppl_path is not None:
-            for _ in range(5):
-                try:
-                    with open(args.result_ppl_path, 'r') as f:
-                        data = json.load(f)
-                        data['end_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        data['archive'].append([arch, nsga_data['archive'][args.arch_idx][1], {'wikitext' : metric_ppl['ppl']['wikitext2']}])
-                    with open(args.result_ppl_path, 'w') as f:
-                        json.dump(data, f, ensure_ascii=False, indent=4)
-
-                    break
-                except Exception as e:
-                    print(e)
-                    sleep(5)
-
-        if args.result_sample_ppl_path is not None:
-            for _ in range(5):
-                try:
-                    with open(args.result_sample_ppl_path, 'r') as f:
-                        data = json.load(f)
-                        data['end_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        data['archive'].append([arch, nsga_data['archive'][args.arch_idx][1], {'wikitext' : metric_ppl['sample_ppl']['wikitext2']}])
-                    with open(args.result_sample_ppl_path, 'w') as f:
-                        json.dump(data, f, ensure_ascii=False, indent=4)
-
-                    break
-                except Exception as e:
-                    print(e)
-                    sleep(5)
-        
+        metric_ppl = get_eval(model, args.model_path, args)
+        if args.result_save_name:
+            write_json(result_ppl_path, [arch, nsga_data['archive'][args.arch_idx][1], {'wikitext' : metric_ppl['ppl']['wikitext2']}])
+            write_json(result_sample_ppl_path, [arch, nsga_data['archive'][args.arch_idx][1], {'wikitext' : metric_ppl['sample_ppl']['wikitext2']}])
 
 
     if args.tasks is not None:

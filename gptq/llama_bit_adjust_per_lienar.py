@@ -126,15 +126,15 @@ def llama_sequential(model, dataloader, dev, arch):
                 #     percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups
                 # )
                 gptq[name].fasterquant(
-                    percdamp=args.percdamp, groupsize=64 if arch['linear'][name][i] == 2 or 2.0 else 128, actorder=args.act_order, static_groups=args.static_groups
+                    percdamp=args.percdamp, groupsize=64 if arch['linear'][name][i] == 2 else 128, actorder=args.act_order, static_groups=args.static_groups
                 )
                 quantizers['model.layers.%d.%s' % (i, name)] = gptq[name].quantizer
                 gptq[name].free()
 
         # import code; code.interact('llama_bit_..., line 133', local=locals())
-        # for j in range(args.nsamples):
-            # outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
-        outs = layer(inps, attention_mask=attention_mask, position_ids=position_ids)[0]
+        for j in range(args.nsamples):
+            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+        # outs = layer(inps, attention_mask=attention_mask, position_ids=position_ids)[0]
 
         layers[i] = layer.cpu()
         del layer
@@ -357,8 +357,8 @@ if __name__ == '__main__':
     if args.eval:
         metric_ppl = get_eval(model, args.model, args)
         if args.result_save_name:
-            write_json(result_ppl_path, [arch, nsga_data['archive'][args.arch_idx][1], {'wikitext' : metric_ppl['ppl']['wikitext2']}])
-            write_json(result_sample_ppl_path, [arch, nsga_data['archive'][args.arch_idx][1], {'wikitext' : metric_ppl['sample_ppl']['wikitext2']}])
+            write_json(result_ppl_path, [arch, nsga_data['archive'][args.arch_idx][1], {'wikitext2' : metric_ppl['ppl']['wikitext2']}])
+            write_json(result_sample_ppl_path, [arch, nsga_data['archive'][args.arch_idx][1], {'wikitext2' : metric_ppl['sample_ppl']['wikitext2']}])
 
     # datasets = ['wikitext2', 'ptb', 'c4'] 
     # if args.new_eval:

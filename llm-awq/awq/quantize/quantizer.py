@@ -62,7 +62,9 @@ def scale_activations(module):
 def pseudo_quantize_tensor(
     w, n_bit=8, zero_point=True, q_group_size=-1, inplace=False, get_scale_zp=False
 ):
-    # import code; code.interact("quantizer, line 65", local=locals())
+    assert n_bit == int(n_bit), "n_bit should be integer"
+    assert q_group_size != 0, "q_group_size should not be 0"
+
     org_w_shape = w.shape
     if q_group_size > 0:
         assert org_w_shape[-1] % q_group_size == 0
@@ -112,7 +114,8 @@ def pseudo_quantize_model_weight_bit_adjust(
     q_config,
 
     ## customizing
-    arch = None
+    arch = None,
+    owq = None,
 ):
     from .pre_quant import get_blocks, get_named_linears
 
@@ -120,12 +123,42 @@ def pseudo_quantize_model_weight_bit_adjust(
     for i in tqdm(range(len(layers)), desc="pseudo weight quantization bit adjust per linear..."):
         named_linears = get_named_linears(layers[i])
         for n, m in named_linears.items():
-            m.cuda()
-            m.weight.data = pseudo_quantize_tensor(
-                m.weight.data, n_bit=arch[n][i],
-                zero_point = q_config["zero_point"], q_group_size = 64 if arch[n][i] == 2 else 128
-            )
-            m.cpu()
+            if int(arch[n][i]) != arch[n][i]:
+                if owq is not None:
+                    original = {}
+                    for linear in ['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'mlp.up_proj', 'mlp.gate_proj', 'mlp.down_proj']:
+                        module, proj = linear.split('.')
+                        key = f'model.layers.{i}.{linear}'
+                        original[key] = getattr(getattr(model.model.layers[i], module), proj).weight[:, owq[key]].clone()
+
+                        # getattr(getattr(model.model.layers[i], module), proj).weight[:, owq[key]].data.zero_()
+                        getattr(getattr(model.model.layers[i], module), proj).weight[:, owq[key]] = 0
+
+                m.cuda()
+                m.weight.data = pseudo_quantize_tensor(
+                    m.weight.data, n_bit=int(arch[n][i]),
+                    zero_point = q_config["zero_point"], q_group_size = 64 if int(arch[n][i]) == 2 else 128
+                )
+                m.cpu()
+
+                if owq is not None:
+                    for linear in ['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'mlp.up_proj', 'mlp.gate_proj', 'mlp.down_proj']:
+                        module, proj = linear.split('.')
+                        key = f'model.layers.{i}.{linear}'
+                        # getattr(getattr(model.model.layers[i], module), proj).weight[:, owq[key]].data.copy_(original[key])
+                        getattr(getattr(model.model.layers[i], module), proj).weight[:, owq[key]] = original[key]
+
+                        del original[key]
+            elif int(arch[n][i]) == arch[n][i]:
+                m.cuda()
+                m.weight.data = pseudo_quantize_tensor(
+                    m.weight.data, n_bit=int(arch[n][i]),
+                    zero_point = q_config["zero_point"], q_group_size = 64 if int(arch[n][i]) == 2 else 128
+                )
+                m.cpu()
+            else:
+                raise NotImplementedError(f"Unsupported bit adjust value {arch[n][i]}")
+
 
 
 @torch.no_grad()
@@ -137,12 +170,15 @@ def pseudo_quantize_model_weight(
     ## customizing
     bit_adjust_per_linear = None,
     arch = None,
+    owq = None,
 ):
     if bit_adjust_per_linear:
         print('bit_adjust_per_linear')
-        pseudo_quantize_model_weight_bit_adjust(model, w_bit, q_config, arch = arch)
+        pseudo_quantize_model_weight_bit_adjust(model, w_bit, q_config, arch = arch, owq = owq)
         return
     from .pre_quant import get_blocks, get_named_linears
+
+    assert owq is None, "owq is not supported in this function"
 
     layers = get_blocks(model)
     for i in tqdm(range(len(layers)), desc="pseudo weight quantization..."):

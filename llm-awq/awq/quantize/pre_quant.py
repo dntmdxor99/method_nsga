@@ -16,6 +16,7 @@ from .auto_clip import auto_clip_block, apply_clip
 from .auto_clip_asym import auto_clip_block_asym, apply_clip_asym
 
 from .auto_scale_bit_adjust_per_linear import auto_scale_block_bit_adjust_per_linear
+from .auto_scale_bit_adjust_per_linear_owq import auto_scale_block_bit_adjust_per_linear_owq
 
 __all__ = ["run_awq"]
 
@@ -96,7 +97,8 @@ def run_awq_bit_adjust(
     ## customizing
     arch = None,
     bit_adjust_per_linear = False,
-    clip_asym = False
+    clip_asym = False,
+    owq = None,
 ):
     assert arch is not None
     from ..utils.calib_data import get_calib_dataset
@@ -160,6 +162,13 @@ def run_awq_bit_adjust(
             "clip": [],
         }
 
+    if owq is not None:
+        auto_scale_func = auto_scale_block_bit_adjust_per_linear_owq
+        print('apply owq')
+    else:
+        auto_scale_func = auto_scale_block_bit_adjust_per_linear
+    
+
     # solve layer by layer
     for i in tqdm.tqdm(range(len(layers)), desc="Running AWQ..."):
         layer = layers[i]
@@ -194,7 +203,7 @@ def run_awq_bit_adjust(
         if (
             auto_scale
         ):  # if it applies, we should also modify the input_feat with scales
-            scales_list = auto_scale_block_bit_adjust_per_linear(
+            scales_list = auto_scale_func(
                 layer,
                 layer_kwargs,
                 w_bit=w_bit,
@@ -202,7 +211,8 @@ def run_awq_bit_adjust(
                 input_feat=input_feat,
 
                 ## customizing
-                module_bit = {proj : arch[proj][i] for proj in ['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj', 'mlp.up_proj', 'mlp.gate_proj', 'mlp.down_proj']}
+                module_bit = {proj : arch[proj][i] for proj in ['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj', 'mlp.up_proj', 'mlp.gate_proj', 'mlp.down_proj']},
+                owq_layer = {proj : owq[f'model.layers.{i}.{proj}'] for proj in ['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'mlp.up_proj', 'mlp.gate_proj', 'mlp.down_proj']} if owq is not None else None,
             )
             # apply_scale(layer, scales_list, input_feat_dict=input_feat)
             apply_scale(layers[i], scales_list, input_feat_dict=input_feat)
@@ -224,7 +234,8 @@ def run_awq_bit_adjust(
 
                     ## customizing
                     bit_adjust = True,
-                    module_bit = {proj : arch[proj][i] for proj in ['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj', 'mlp.up_proj', 'mlp.gate_proj', 'mlp.down_proj']}
+                    module_bit = {proj : int(arch[proj][i]) for proj in ['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj', 'mlp.up_proj', 'mlp.gate_proj', 'mlp.down_proj']},
+                    # owq_layer = {proj : owq[f'model.layers.{i}.{proj}'] for proj in ['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'mlp.up_proj', 'mlp.gate_proj', 'mlp.down_proj']} if owq is not None else None,
                 )
                 apply_clip_asym(layer, max_clip_list, min_clip_list)
                 awq_results['max_clip'] += append_str_prefix(
@@ -243,7 +254,8 @@ def run_awq_bit_adjust(
 
                     ## customizing
                     bit_adjust = True,
-                    module_bit = {proj : arch[proj][i] for proj in ['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj', 'mlp.up_proj', 'mlp.gate_proj', 'mlp.down_proj']}
+                    module_bit = {proj : int(arch[proj][i]) for proj in ['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj', 'mlp.up_proj', 'mlp.gate_proj', 'mlp.down_proj']},
+                    # owq_layer = {proj : owq[f'model.layers.{i}.{proj}'] for proj in ['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'mlp.up_proj', 'mlp.gate_proj', 'mlp.down_proj']} if owq is not None else None,
 
                 )
                 apply_clip(layer, clip_list)
@@ -278,15 +290,16 @@ def run_awq(
     quantflow = False,
     bit_adjust_per_linear = False,
     arch = None,
-    clip_asym = False
+    clip_asym = False,
+    owq = None,
 ):
     if quantflow:
-        return run_awq_quantflow(model, enc, w_bit, q_config, n_samples, seqlen, auto_scale, mse_range, calib_data, clip_asym = clip_asym)
+        return run_awq_quantflow(model, enc, w_bit, q_config, n_samples, seqlen, auto_scale, mse_range, calib_data, clip_asym = clip_asym, owq = owq)
     if bit_adjust_per_linear:
         print('bit_adjust_per_linear')
         print("clip_asym", clip_asym)
         return run_awq_bit_adjust(model, enc, w_bit, q_config, n_samples, seqlen, auto_scale, mse_range, calib_data, arch, 
-                                  bit_adjust_per_linear = bit_adjust_per_linear, clip_asym = clip_asym)
+                                  bit_adjust_per_linear = bit_adjust_per_linear, clip_asym = clip_asym, owq = owq)
 
     from ..utils.calib_data import get_calib_dataset
     from ..utils.module import append_str_prefix, get_op_name
@@ -437,12 +450,36 @@ def run_awq(
     return awq_results
 
 
-def apply_awq(model, awq_results):
+@torch.no_grad()
+def apply_awq(model, awq_results, owq = None):
+    # if owq is not None:
+    #     original = {}
+    #     # keys() of owq is model.layers.n.self_attn.q_proj, etc.
+    #     # values() of owq is column list
+    #     for i in range(len(model.model.layers)):
+    #         for linear in ['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'mlp.up_proj', 'mlp.gate_proj', 'mlp.down_proj']:
+    #             module, proj = linear.split('.')
+    #             key = f'model.layers.{i}.{linear}'
+    #             original[key] = getattr(getattr(model.model.layers[i], module), proj).weight[:, owq[key]].clone()
+
+    #             # getattr(getattr(model.model.layers[i], module), proj).weight[:, owq[key]].data.zero_()
+    #             getattr(getattr(model.model.layers[i], module), proj).weight[:, owq[key]] = 0
+                
     apply_scale(model, awq_results["scale"])
     if "clip" in awq_results:
         apply_clip(model, awq_results["clip"])
     elif "max_clip" in awq_results:
         apply_clip_asym(model, awq_results["max_clip"], awq_results["min_clip"])
+
+    # if owq is not None:
+    #     for i in range(len(model.model.layers)):
+    #         for linear in ['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'mlp.up_proj', 'mlp.gate_proj', 'mlp.down_proj']:
+    #             module, proj = linear.split('.')
+    #             key = f'model.layers.{i}.{linear}'
+    #             # getattr(getattr(model.model.layers[i], module), proj).weight[:, owq[key]].data.copy_(original[key])
+    #             getattr(getattr(model.model.layers[i], module), proj).weight[:, owq[key]] = original[key]
+
+    #             del original[key]
 
 
 ## customizing for true quantflow

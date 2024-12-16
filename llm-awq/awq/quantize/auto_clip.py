@@ -85,7 +85,8 @@ def auto_clip_block_bit_adjust(module, w_bit, q_config, input_feat, module_bit =
 
 
 @torch.no_grad()
-def auto_clip_block(module, w_bit, q_config, input_feat, bit_adjust = False, module_bit = None):
+def auto_clip_block(module, w_bit, q_config, input_feat, bit_adjust = False, module_bit = None, owq_layer = None):
+    assert owq_layer is not None, "owq_layer is not implemented in this scenario"
     if bit_adjust:
         return auto_clip_block_bit_adjust(module, w_bit, q_config, input_feat, module_bit)
     named_linears = {

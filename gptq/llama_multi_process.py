@@ -89,21 +89,20 @@ def run(args, gpu_id, arch_idx):
         'nohup',
         'python',
         '-u',
-        '-m',
-        'llama_bit_adjust_per_lienar.py',
+        'llama_bit_adjust_per_linear.py',
 
         f'{args.model}' if args.model is not None else '',
         f'{args.dataset}' if args.dataset is not None else '',
         f'--seed {args.seed}' if args.seed is not None else '',
-        f'--nsamples {args.nsamples}' if args.nsamples is not None else '',
+        # f'--nsamples {args.nsamples}' if args.nsamples is not None else '',
         f'--wbits {args.wbits}' if args.wbits is not None else '',
         f'--groupsize {args.groupsize}' if args.groupsize is not None else '',
-        f'--sym' if args.sym is True else '',
-        f'--save {args.save}' if args.save is not None else '',
-        f'--new_eval' if args.new_eval is True else '',
-        f'--act_order' if args.act_order is True else '',
-        f'--true_sequential' if args.true_sequential is True else '',
-        f'--static_groups' if args.static_groups is True else '',
+        # f'--sym' if args.sym is True else '',
+        # f'--save {args.save}' if args.save is not None else '',
+        # f'--new_eval' if args.new_eval is True else '',
+        # f'--act_order' if args.act_order is True else '',
+        f'--true-sequential' if args.true_sequential is True else '',
+        # f'--static_groups' if args.static_groups is True else '',
 
         f'--arch_path {args.arch_path}' if args.arch_path is not None else '',
         f'--arch_idx {arch_idx}' if arch_idx is not None else '',
@@ -141,7 +140,7 @@ if __name__ == "__main__":
             p = multiprocessing.Process(target=run, args=(args, gpu_id, arch_idx))
             p.start()
             proc.append(p)
-            arch_idx += 1
+            arch_idx += 2
             if arch_idx >= len_archs:
                 break
             sleep(5)
